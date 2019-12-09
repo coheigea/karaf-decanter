@@ -16,6 +16,10 @@
  */
 package org.apache.karaf.decanter.appender.elasticsearch.jest;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.security.KeyManagementException;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
@@ -45,7 +49,6 @@ import org.apache.karaf.decanter.appender.utils.EventFilter;
 import org.osgi.service.component.ComponentContext;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
-import org.osgi.service.component.annotations.ConfigurationPolicy;
 import org.osgi.service.component.annotations.Deactivate;
 import org.osgi.service.component.annotations.Reference;
 import org.osgi.service.event.Event;
@@ -74,6 +77,11 @@ public class ElasticsearchAppender implements EventHandler {
     public static final String INDEX_PREFIX_PROPERTY = "index.prefix";
     public static final String INDEX_TYPE_PROPERTY = "index.type";
     public static final String INDEX_EVENT_TIMESTAMPED_PROPERTY = "index.event.timestamped";
+
+    public static final String TLS_DISABLE_CN_CHECK = "tls.disableCNCheck";
+    public static final String TLS_TRUSTSTORE_PATH = "tls.truststore.path";
+    public static final String TLS_TRUSTSTORE_PASSWORD = "tls.truststore.password";
+    public static final String TLS_TRUST_ALL_CERTS = "tls.trustAllCerts";
 
     public static final String ADDRESS_DEFAULT = "http://localhost:9200";
     public static final String USERNAME_DEFAULT = null;
@@ -108,7 +116,7 @@ public class ElasticsearchAppender implements EventHandler {
         String password = getValue(config, PASSWORD_PROPERTY, PASSWORD_DEFAULT);
         Builder builder = new HttpClientConfig.Builder(addresses).readTimeout(10000)
             .multiThreaded(true);
-        
+
         if (addresses.size() > 1) {
             builder = builder
                     .discoveryEnabled(true)
@@ -121,11 +129,37 @@ public class ElasticsearchAppender implements EventHandler {
             if (address.startsWith("https")) {
                 try {
                     SSLContextBuilder sslContextBuilder = new SSLContextBuilder();
-                    sslContextBuilder.loadTrustMaterial(new TrustAny());
+
+                    boolean trustAllCerts = config.get(TLS_TRUST_ALL_CERTS) != null ?
+                        Boolean.parseBoolean((String)config.get(TLS_TRUST_ALL_CERTS)) : false;
+                    if (trustAllCerts) {
+                        sslContextBuilder.loadTrustMaterial(new TrustAny());
+                    } else {
+                        String truststorePath = (String)config.get(TLS_TRUSTSTORE_PATH);
+                        if (truststorePath != null) {
+                            File truststoreFile = Paths.get(truststorePath).toFile();
+                            String truststorePassword = (String)config.get(TLS_TRUSTSTORE_PASSWORD);
+                            try {
+                                if (truststorePassword != null) {
+                                    sslContextBuilder.loadTrustMaterial(truststoreFile, truststorePassword.toCharArray());
+                                } else {
+                                    sslContextBuilder.loadTrustMaterial(truststoreFile);
+                                }
+                            } catch (CertificateException | IOException e) {
+                                throw new RuntimeException("Error setting up TLS truststore", e);
+                            }
+                        }
+                    }
+
                     SSLContext sslContext = sslContextBuilder.build();
-                    HostnameVerifier hostnameVerifier = NoopHostnameVerifier.INSTANCE;
+
+                    boolean disableCNCheck = config.get(TLS_DISABLE_CN_CHECK) != null ?
+                        Boolean.parseBoolean((String)config.get(TLS_DISABLE_CN_CHECK)) : false;
+                    HostnameVerifier hostnameVerifier = disableCNCheck ? NoopHostnameVerifier.INSTANCE
+                            : new DefaultHostnameVerifier();
                     SSLConnectionSocketFactory sslSocketFactory = 
                             new SSLConnectionSocketFactory(sslContext, hostnameVerifier);
+
                     builder.defaultSchemeForDiscoveredNodes("https").sslSocketFactory(sslSocketFactory);
                 } catch (KeyManagementException | KeyStoreException | NoSuchAlgorithmException ex) {
                     throw new RuntimeException("SSL exception when connect to ElasticSearch", ex);
